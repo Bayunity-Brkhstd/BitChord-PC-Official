@@ -79,7 +79,7 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64, only: Opti
     };
     painter.rect_filled(screen, 0.0, base_color(app));
     let art = matches!(mode, BgMode::Kawarp | BgMode::CoverStatic | BgMode::CoverFullbleed);
-    if let Some(bg) = app.bg.as_ref().filter(|_| art) {
+    if let Some(bg) = app.bg.as_ref().filter(|_| art && !app.disable_blur) {
         let blend = theme::ease_in_out(((now - app.art_changed) / 1.4) as f32);
         if blend < 1.0 {
             // The crossfade to new art finishes even while paused.
@@ -1037,13 +1037,19 @@ fn mark(ui: &Ui, r: Rect, tint: Color32) {
             let Ok(img) = image::load_from_memory(MARK) else { return };
             let img = img.into_rgba8();
             let color = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
-            let t = ui.ctx().load_texture("bitchord-mark", color, egui::TextureOptions::LINEAR);
+            let options = egui::TextureOptions {
+                magnification: egui::TextureFilter::Linear,
+                minification: egui::TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                mipmap_mode: Some(egui::TextureFilter::Linear),
+            };
+            let t = ui.ctx().load_texture("bitchord-mark", color, options);
             ui.ctx().data_mut(|d| d.insert_temp(key, t.clone()));
             t
         }
     };
     let k = (r.width() / W).min(r.height() / H);
-    let dst = Rect::from_center_size(r.center(), vec2(W * k, H * k));
+    let dst = Rect::from_center_size(r.center(), vec2((W * k).round(), (H * k).round()));
     ui.painter().image(tex.id(), dst, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
 }
 

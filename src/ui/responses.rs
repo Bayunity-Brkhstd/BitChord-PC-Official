@@ -323,8 +323,9 @@ impl App {
                 if self.mix_hold().is_none() && self.current_id() == Some(key.as_str()) {
                     self.accent = art.accent;
                     if let Some(bg) = &self.bg {
-                        bg.set_art(art);
+                        bg.set_art(art.clone());
                     }
+                    self.background_art = Some(art);
                     self.art_key = Some(key);
                     self.art_changed = now;
                 }

@@ -151,17 +151,13 @@ fn main() -> eframe::Result {
     };
 
     let create_app = |cc: &eframe::CreationContext<'_>| -> anyhow::Result<ui::App> {
-        let ctx = cc.egui_ctx.clone();
-        theme::install_style(&ctx);
-        theme::install_fonts(&ctx, "inter");
-
         #[cfg(target_os = "linux")]
         let wake = tray::wayland::wake;
         // Background threads wake the UI through this.
         #[cfg(not(target_os = "linux"))]
         static CTX: OnceLock<egui::Context> = OnceLock::new();
         #[cfg(not(target_os = "linux"))]
-        let _ = CTX.set(ctx.clone());
+        let _ = CTX.set(cc.egui_ctx.clone());
         #[cfg(not(target_os = "linux"))]
         let wake = || {
             if let Some(c) = CTX.get() {
@@ -213,9 +209,6 @@ fn main() -> eframe::Result {
         let (resp_tx, resp_rx) = unbounded();
         let backend = backend::Backend::new(data_dir, resp_tx, audio.clone(), Arc::new(wake))?;
 
-        egui_extras::install_image_loaders(&ctx);
-        ctx.add_bytes_loader(Arc::new(images::HttpImages::new(backend.clone())));
-
         let (media_tx, media_rx) = unbounded();
         if let Some(h) = hwnd(cc) {
             appicon::set_hwnd(h);
@@ -249,7 +242,7 @@ fn main() -> eframe::Result {
                 info.driver_info
             );
         }
-        Ok(ui::App::new(
+        let mut app = ui::App::new(
             backend,
             audio,
             ui::Channels {
@@ -258,9 +251,10 @@ fn main() -> eframe::Result {
                 media_rx,
             },
             media,
-            make_background(cc),
             cc.storage,
-        ))
+        );
+        app.setup_window(cc);
+        Ok(app)
     };
     #[cfg(target_os = "linux")]
     let run = tray::wayland::run(options, create_app);
@@ -285,15 +279,25 @@ fn main() -> eframe::Result {
 }
 
 // Each renderer owns its own background resources.
-fn make_background(cc: &eframe::CreationContext<'_>) -> Option<shader::Background> {
+fn make_background(
+    cc: &eframe::CreationContext<'_>,
+    art: Option<&art::Art>,
+) -> Option<shader::Background> {
     if std::env::var_os("YTM_NO_SHADER").is_some() {
         return None;
     }
+    let idle;
+    let art = if let Some(art) = art {
+        art
+    } else {
+        idle = art::idle();
+        &idle
+    };
     match (&cc.gl, &cc.wgpu_render_state) {
-        (Some(gl), _) => shader::Background::new(gl)
+        (Some(gl), _) => shader::Background::new(gl, art)
             .map_err(|err| log::warn!("background shader unavailable: {err:#}"))
             .ok(),
-        (_, Some(rs)) => Some(shader::Background::new_wgpu(rs)),
+        (_, Some(rs)) => Some(shader::Background::new_wgpu(rs, art)),
         _ => None,
     }
 }

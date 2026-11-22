@@ -379,6 +379,7 @@ pub struct App {
 
     // visuals
     art_key: Option<String>,
+    background_art: Option<crate::art::Art>,
     art_changed: f64,
     /// Apple's page for each artist visited (their display name and hero clips).
     apple_artists: std::collections::HashMap<String, Option<crate::apple::Artwork>>,
@@ -595,7 +596,6 @@ impl App {
         audio: AudioHandle,
         ch: Channels,
         media: Option<Media>,
-        bg: Option<Background>,
         storage: Option<&dyn eframe::Storage>,
     ) -> Self {
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
@@ -656,7 +656,7 @@ impl App {
             was_focused: false,
             queue_source: None,
             play_pending: None,
-            bg,
+            bg: None,
             page: Page::Home,
             back: Vec::new(),
             forward: Vec::new(),
@@ -780,6 +780,7 @@ impl App {
             upgrading_quality: false,
             upgrade_asked: false,
             disable_direct_stream,
+            background_art: None,
             art_changed: -10.0,
             accent: theme::RED,
             theme_id: crate::preset::DEFAULT_ID.to_owned(),
@@ -1207,17 +1208,26 @@ impl App {
         self.window.exiting()
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn attach_wayland_window(&mut self, cc: &eframe::CreationContext<'_>) {
+    pub(crate) fn setup_window(&mut self, cc: &eframe::CreationContext<'_>) {
         let ctx = &cc.egui_ctx;
-        theme::install_style(ctx);
-        theme::install_fonts(ctx, "inter");
+        self.sync_look();
+        let now_playing = self.np_open && self.current().is_some();
+        let light = self.light_pages(ctx) && !now_playing && !self.fullscreen;
+        theme::set_mode(ctx, light);
+        self.apply_chrome(ctx);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique("accent"), self.accent_color()));
         egui_extras::install_image_loaders(ctx);
         ctx.add_bytes_loader(Arc::new(crate::images::HttpImages::new(
             self.backend.clone(),
         )));
-        self.chrome_applied = None;
-        self.bg = crate::make_background(cc);
+        ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
+        self.bg = crate::make_background(cc, self.background_art.as_ref());
+    }
+
+    fn apply_chrome(&mut self, ctx: &egui::Context) {
+        let look = self.look();
+        theme::apply_chrome(ctx, look);
+        self.chrome_applied = Some(look.id.clone());
     }
 
     #[cfg(target_os = "linux")]
@@ -1374,11 +1384,7 @@ impl eframe::App for App {
         let light = self.light_pages(&ctx) && np < 0.5 && !self.fullscreen;
         theme::set_mode(&ctx, light);
         if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
-            if self.chrome_applied.is_none() {
-                ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
-            }
-            theme::apply_chrome(&ctx, look);
-            self.chrome_applied = Some(look.id.clone());
+            self.apply_chrome(&ctx);
         }
         let accent = self.accent_color();
         ctx.data_mut(|d| d.insert_temp(egui::Id::unique("accent"), accent));

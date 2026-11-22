@@ -157,7 +157,7 @@ pub(crate) fn run(
                 let (app, geometry) = (&mut *app, &mut geometry);
                 move |cc| {
                     *CONTEXT.lock().unwrap() = Some(cc.egui_ctx.clone());
-                    app.attach_wayland_window(cc);
+                    app.setup_window(cc);
                     cc.egui_ctx
                         .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Informational,

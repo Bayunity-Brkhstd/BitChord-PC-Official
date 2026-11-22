@@ -10,12 +10,6 @@
     <a href="LICENSE"><img src="https://img.shields.io/github/license/jackychan4891/BitChord-PC-Continued?style=flat-square&color=333&labelColor=0d1117" alt="License: GPL-3.0"></a>
   </p>
 
-  <p>
-    <a href="https://github.com/jackychan4891/BitChord-PC-Continued/releases/latest">Download</a> ·
-    <a href="#features">Features</a> ·
-    <a href="#installation">Installation</a>
-  </p>
-</div>
 
 > [!IMPORTANT]
 > BitChord is not affiliated with, endorsed by, or connected to YouTube, Google or Apple.

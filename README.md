@@ -72,6 +72,11 @@ Download the latest build from [Releases](https://github.com/jackychan4891/BitCh
 - **Windows** — download the Windows release asset, extract/install it, and run `bitchord.exe`.
 - **macOS / Linux** — use the platform release assets when available.
 
+On Linux, BitChord keeps a system tray icon on X11 and XWayland when the desktop
+provides a StatusNotifierItem tray. Closing the window keeps playback running.
+Use **Show** to restore it or **Quit** to exit. Without a tray host, closing the
+window exits. See the [Linux tray requirements and verification notes](docs/linux-tray.md).
+
 If Windows SmartScreen appears for an unsigned build, choose **More info → Run anyway**.
 
 ## Building from source

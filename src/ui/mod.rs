@@ -112,6 +112,7 @@ pub enum Action {
     /// Rows (indices into the open playlist) to take out of it.
     RemoveFromPlaylist(Vec<usize>),
     Download(Track),
+    DownloadBatch(Vec<Track>),
     NewPlaylist(Vec<Track>),
     EditPlaylist,
     /// The open playlist's collaboration settings.
@@ -309,6 +310,7 @@ pub struct App {
     recent_searches: Vec<RecentSearch>,
     /// A search whose results are on screen, waiting for the first result to be opened.
     search_pending: bool,
+    pub search_library_only: bool,
     suggestions: (String, Vec<crate::ytm::Suggestion>),
     /// Up to 32 query results, oldest first, scoped to the current suggestion round.
     suggest_cache: VecDeque<(String, Vec<crate::ytm::Suggestion>)>,
@@ -567,6 +569,8 @@ pub struct App {
     dialog: Option<Dialog>,
     share_pending: Option<String>,
     smoke: Option<String>,
+    pub sleep_timer: Option<std::time::Instant>,
+    pub sleep_base_volume: Option<f32>,
 }
 
 /// Longest crossfade offered, in seconds.
@@ -666,6 +670,7 @@ impl App {
             search_synced: String::new(),
             recent_searches: get("recent_searches").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             search_pending: false,
+            search_library_only: false,
             suggestions: Default::default(),
             suggest_cache: VecDeque::new(),
             suggest_sel: None,
@@ -827,6 +832,8 @@ impl App {
             dialog: None,
             share_pending: None,
             smoke: None,
+            sleep_timer: None,
+            sleep_base_volume: None,
         };
         app.request_liked(false);
         // Dev hooks: YTM_SMOKE="query" searches and plays the first song ("id:<videoId>[,<videoId>…]"
@@ -969,7 +976,7 @@ impl App {
             }
             Page::New => Some(Req::Explore(self.preferred_artist_ids())),
             // The empty search is the page's landing state: nothing to ask for.
-            Page::Search(q) if !q.trim().is_empty() && self.search.as_ref().is_none_or(|s| &s.query != q) => Some(Req::Search(q.clone())),
+            Page::Search(q) if !self.search_library_only && !q.trim().is_empty() && self.search.as_ref().is_none_or(|s| &s.query != q) => Some(Req::Search(q.clone())),
             Page::Album(id) | Page::Playlist(id) => {
                 self.visit_list(id, matches!(self.page, Page::Album(_)));
                 None
@@ -1213,6 +1220,31 @@ impl eframe::App for App {
             self.upload_files(files);
         }
         transfer::poll(self, ctx, now);
+        // Sleep timer tick with 30s gradual fade-out
+        if let Some(target) = self.sleep_timer {
+            let sys_now = std::time::Instant::now();
+            if sys_now >= target {
+                self.sleep_timer = None;
+                if let Some(orig_vol) = self.sleep_base_volume.take() {
+                    self.audio.send(crate::audio::AudioCmd::Volume(orig_vol));
+                }
+                self.audio.send(crate::audio::AudioCmd::Pause);
+                self.toast("Sleep timer finished: playback paused");
+            } else {
+                let remaining = target.saturating_duration_since(sys_now);
+                let rem_secs = remaining.as_secs_f32();
+                if rem_secs <= 30.0 {
+                    if self.sleep_base_volume.is_none() {
+                        self.sleep_base_volume = Some(self.audio.volume());
+                    }
+                    if let Some(base_vol) = self.sleep_base_volume {
+                        let factor = (rem_secs / 30.0).powi(2);
+                        self.audio.send(crate::audio::AudioCmd::Volume(base_vol * factor));
+                    }
+                }
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
+        }
         if crate::deeplink::take_show() {
             self.show_window(ctx);
         }

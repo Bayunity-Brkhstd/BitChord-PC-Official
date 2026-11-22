@@ -381,6 +381,7 @@ pub struct App {
 
     // visuals
     art_key: Option<String>,
+    background_art: Option<crate::art::Art>,
     art_changed: f64,
     /// Apple's page for each artist visited (their display name and hero clips).
     apple_artists: std::collections::HashMap<String, Option<crate::apple::Artwork>>,
@@ -531,17 +532,19 @@ pub struct App {
 
     // window
     /// Clicking × hides the window to the tray instead of quitting.
+    #[cfg(not(target_os = "linux"))]
     close_to_tray: bool,
     /// Settings › Window: draw with wgpu (Vulkan) from the next start (renderer.rs).
     pub(super) wgpu_renderer: bool,
     /// The app icon (`appicon::ALL` id) shown on the window and in the tray.
     app_icon: &'static str,
-    /// The tray icon, while the window is hidden.
+    /// Persistent on Linux, on demand elsewhere.
     tray: Option<crate::tray::Tray>,
-    /// Closing for real (Quit from the tray, restart to update): don't hide.
-    exiting: bool,
-    /// Minimized, or hidden in the tray: the window's geometry isn't worth saving.
-    window_hidden: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) native_wayland: bool,
+    window: crate::tray::Window,
+    #[cfg(target_os = "linux")]
+    focus_after_show: Option<f64>,
     /// eframe's saved window geometry ("window") from the last time it was visible.
     good_window: Option<String>,
     /// The sidebar is a narrow icon rail.
@@ -598,7 +601,6 @@ impl App {
         audio: AudioHandle,
         ch: Channels,
         media: Option<Media>,
-        bg: Option<Background>,
         storage: Option<&dyn eframe::Storage>,
     ) -> Self {
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
@@ -659,7 +661,7 @@ impl App {
             was_focused: false,
             queue_source: None,
             play_pending: None,
-            bg,
+            bg: None,
             page: Page::Home,
             back: Vec::new(),
             forward: Vec::new(),
@@ -715,12 +717,16 @@ impl App {
             output_device: get("output_device").filter(|d| !d.is_empty()).map(|id| (id, get("output_device_name").unwrap_or_default())),
             output_devices: Vec::new(),
             updater: None,
+            #[cfg(not(target_os = "linux"))]
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
             wgpu_renderer,
             app_icon,
             tray: None,
-            exiting: false,
-            window_hidden: false,
+            #[cfg(target_os = "linux")]
+            native_wayland: false,
+            window: crate::tray::Window::default(),
+            #[cfg(target_os = "linux")]
+            focus_after_show: None,
             good_window: get("window"),
             sidebar_collapsed: get("sidebar_collapsed").is_some_and(|v| v == "1"),
             playlist_order: get("playlist_order").map(|v| v.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default(),
@@ -780,6 +786,7 @@ impl App {
             upgrading_quality: false,
             upgrade_asked: false,
             disable_direct_stream,
+            background_art: None,
             art_changed: -10.0,
             accent: theme::RED,
             theme_id: crate::preset::DEFAULT_ID.to_owned(),
@@ -1199,11 +1206,63 @@ impl App {
 
 
 
-impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl App {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wayland_detached(&self) -> bool {
+        self.native_wayland && self.window.detached()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wayland_exiting(&self) -> bool {
+        self.window.exiting()
+    }
+
+    pub(crate) fn setup_window(&mut self, cc: &eframe::CreationContext<'_>) {
+        let ctx = &cc.egui_ctx;
+        self.sync_look();
+        let now_playing = self.np_open && self.current().is_some();
+        let light = self.light_pages(ctx) && !now_playing && !self.fullscreen;
+        theme::set_mode(ctx, light);
+        self.apply_chrome(ctx);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique("accent"), self.accent_color()));
+        egui_extras::install_image_loaders(ctx);
+        ctx.add_bytes_loader(Arc::new(crate::images::HttpImages::new(
+            self.backend.clone(),
+        )));
+        ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
+        self.bg = crate::make_background(cc, self.background_art.as_ref());
+    }
+
+    fn apply_chrome(&mut self, ctx: &egui::Context) {
+        let look = self.look();
+        theme::apply_chrome(ctx, look);
+        self.chrome_applied = Some(look.id.clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn detach_wayland_window(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let (Some(bg), Some(gl)) = (self.bg.take(), gl) {
+            bg.destroy(gl);
+        }
+        self.deload_motion();
+        self.signature_tex.clear();
+        self.lyric_view = karaoke::View::default();
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wayland_viewport(&self, builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+        self.mini.wayland_viewport(builder)
+    }
+
+    pub(crate) fn run_logic(&mut self, ctx: &egui::Context, now: f64, has_window: bool) {
+        let links = crate::deeplink::take();
+        let reveal = crate::deeplink::take_show() || !links.is_empty();
+        self.tray_window(ctx, reveal);
+        if self.window.exiting() {
+            return;
+        }
         dev_pace();
         self.lyric_view.release_hidden(ctx.cumulative_pass_nr());
-        let now = ctx.input(|i| i.time);
         self.sync_look();
         self.pump(now);
         self.skip_segments(ctx, now);
@@ -1220,6 +1279,7 @@ impl eframe::App for App {
             self.upload_files(files);
         }
         transfer::poll(self, ctx, now);
+        for link in links {
         // Sleep timer tick with 30s gradual fade-out
         if let Some(target) = self.sleep_timer {
             let sys_now = std::time::Instant::now();
@@ -1274,7 +1334,9 @@ impl eframe::App for App {
                 }
             }
         }
-        fit_window_to_monitor(ctx);
+        if has_window {
+            fit_window_to_monitor(ctx);
+        }
         // Dev hook: YTM_MINI=<secs>[,<secs>…] switches between the mini player and the
         // full window at those times (YTM_MINI=1: the mini player after a second).
         if let Some(v) = dev_var("YTM_MINI") {
@@ -1290,12 +1352,12 @@ impl eframe::App for App {
                 }
             }
         }
-        if let Some(on) = self.mini.take_request() {
-            self.set_mini(ctx, on, now);
+        if has_window {
+            if let Some(on) = self.mini.take_request() {
+                self.set_mini(ctx, on, now);
+            }
+            self.mini.tick(ctx, now);
         }
-        self.mini.tick(ctx, now);
-        self.tray_window(ctx);
-        self.window_hidden = self.tray.is_some() || ctx.input(|i| i.viewport().minimized == Some(true));
         self.sync_discord();
         self.sync_lastfm();
         self.sync_server_queue(ctx, now);
@@ -1319,7 +1381,7 @@ impl eframe::App for App {
         // lyrics ask for every frame while they animate (the karaoke sweep must be
         // smooth). Each egui frame re-lays-out the UI, so frame rate is the main CPU cost.
         let playing = self.playing();
-        if self.window_hidden {
+        if self.window.hidden() {
             // In the tray or minimized: nothing to draw, only the player bookkeeping.
             if playing || self.buffering {
                 ctx.request_repaint_after(Duration::from_millis(250));
@@ -1338,8 +1400,17 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.run_logic(ctx, ctx.input(|i| i.time), true);
+    }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if self.window.exiting() {
+            return;
+        }
         let ctx = ui.ctx().clone();
         self.shortcuts(&ctx);
         let now = ctx.input(|i| i.time);
@@ -1352,11 +1423,7 @@ impl eframe::App for App {
         let light = self.light_pages(&ctx) && np < 0.5 && !self.fullscreen;
         theme::set_mode(&ctx, light);
         if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
-            if self.chrome_applied.is_none() {
-                ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
-            }
-            theme::apply_chrome(&ctx, look);
-            self.chrome_applied = Some(look.id.clone());
+            self.apply_chrome(&ctx);
         }
         let accent = self.accent_color();
         ctx.data_mut(|d| d.insert_temp(egui::Id::unique("accent"), accent));
@@ -1548,7 +1615,10 @@ impl eframe::App for App {
         storage.set_string("output_device_name", device_name.unwrap_or_default());
         // eframe has just saved the window's geometry. Minimized or in the tray that's
         // 0×0 at -32000, which would reopen as a speck: keep the last real one instead.
-        if self.window_hidden {
+        let preserve_geometry = self.window.hidden();
+        #[cfg(target_os = "linux")]
+        let preserve_geometry = preserve_geometry && !self.native_wayland;
+        if preserve_geometry {
             if let Some(w) = &self.good_window {
                 storage.set_string("window", w.clone());
             }
@@ -1561,6 +1631,7 @@ impl eframe::App for App {
             storage.set_string("window", w.clone());
             self.good_window = Some(w);
         }
+        #[cfg(not(target_os = "linux"))]
         storage.set_string("close_to_tray", b(self.close_to_tray));
         storage.set_string("sidebar_collapsed", b(self.sidebar_collapsed));
         // The sidebar's playlist order, completed with any playlist that appeared since
@@ -1619,6 +1690,13 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        #[cfg(target_os = "linux")]
+        {
+            // eframe saves the playback position before the audio thread shuts down.
+            self.audio.shutdown();
+            self.tray = None;
+            crate::child_process::HELPERS.stop();
+        }
         if let (Some(bg), Some(gl)) = (&self.bg, gl) {
             bg.destroy(gl);
         }
@@ -1675,7 +1753,11 @@ fn relaunch() {
         let script = format!("ping -n 3 127.0.0.1 >NUL & start \"\" \"{}\"", exe.display());
         let _ = std::process::Command::new("cmd").arg("/C").raw_arg(&script).creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new(exe).arg(crate::deeplink::RELAUNCH_FLAG).spawn();
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = std::process::Command::new(exe).spawn();
     }
